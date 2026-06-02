@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ScalaCompilerConfiguration">
+    <option name="separateProdTestSources" value="true" />
+    <profile name="sbt 1" modules="scala-dev-mooc-2026-04,scala-dev-mooc-2026-04.main,scala-dev-mooc-2026-04.test,scala-dev-mooc-2026-04_6444,scala-dev-mooc-2026-04_6444.main,scala-dev-mooc-2026-04_6444.test" />
+  </component>
+</project>
