@@ -1,139 +1,150 @@
-package module5.events
-
 import java.time.Instant
 import java.util.UUID
 
-// Общая метаинформация для любого события.
-final case class EventMetadata(
-  eventId: UUID,
-  eventType: String,
-  version: Int,
-  occurredAt: Instant,
-  aggregateId: String,
-  correlationId: Option[UUID] = None,
-  causationId: Option[UUID] = None,
-  producer: String
-)
+// ------------------------------------------------------------
+// 1. Domain event: факт, который уже произошёл
+// ------------------------------------------------------------
 
-// Базовый контракт доменного события.
-sealed trait DomainEvent:
-  def metadata: EventMetadata
+sealed trait DomainEvent
 
-// Версия 1 события OrderPlaced.
-final case class OrderPlacedV1(
-  metadata: EventMetadata,
-  customerId: String,
-  total: BigDecimal
-) extends DomainEvent
+final case class OrderPlaced(
+                              orderId: String,
+                              customerId: String,
+                              total: BigDecimal
+                            ) extends DomainEvent
 
-// Версия 2: добавили optional-поле currency,
-// не ломая чтение старых событий.
-final case class OrderPlacedV2(
-  metadata: EventMetadata,
-  customerId: String,
-  total: BigDecimal,
-  currency: Option[String]
-) extends DomainEvent
+// ------------------------------------------------------------
+// 2. Envelope: техническая информация вокруг доменного события
+// ------------------------------------------------------------
 
-// Простой append-only event log в памяти.
-// Для лекционного примера важна именно семантика:
-// события только добавляются, существующие записи не изменяются.
+final case class EventEnvelope[E <: DomainEvent](
+                                                  eventId: UUID,
+                                                  aggregateId: String,
+                                                  eventType: String,
+                                                  version: Int,
+                                                  occurredAt: Instant,
+                                                  correlationId: Option[UUID],
+                                                  causationId: Option[UUID],
+                                                  producer: String,
+                                                  payload: E
+                                                )
+
+// ------------------------------------------------------------
+// 3. Event log: append-only история событий
+// ------------------------------------------------------------
+
 final class InMemoryEventLog:
-  private var events: Vector[DomainEvent] = Vector.empty
+  private var events: Vector[EventEnvelope[? <: DomainEvent]] =
+    Vector.empty
 
-  def append(event: DomainEvent): Unit =
+  def append[E <: DomainEvent](event: EventEnvelope[E]): Unit =
     events = events :+ event
 
-  def all: Vector[DomainEvent] =
+  def all: Vector[EventEnvelope[? <: DomainEvent]] =
     events
 
-  def byAggregateId(aggregateId: String): Vector[DomainEvent] =
-    events.filter(_.metadata.aggregateId == aggregateId)
+  def byAggregateId(
+                     aggregateId: String
+                   ): Vector[EventEnvelope[? <: DomainEvent]] =
+    events.filter(_.aggregateId == aggregateId)
 
-// Проекция: восстанавливаем текущее состояние заказа
-// из последовательности событий.
-final case class OrderView(
-  orderId: String,
-  customerId: String,
-  total: BigDecimal,
-  currency: String
-)
+// ------------------------------------------------------------
+// 4. Aggregate state
+//
+// Это НЕ CQRS read model.
+// Это состояние aggregate, которое можно восстановить из событий.
+// ------------------------------------------------------------
 
-object OrderProjection:
-  def replay(events: Seq[DomainEvent]): Option[OrderView] =
-    events.foldLeft(Option.empty[OrderView]) {
-      case (_, event: OrderPlacedV1) =>
+final case class OrderState(
+                             orderId: String,
+                             customerId: String,
+                             total: BigDecimal
+                           )
+
+object Order:
+
+  def evolve(
+              state: Option[OrderState],
+              event: DomainEvent
+            ): Option[OrderState] =
+    event match
+      case e: OrderPlaced =>
         Some(
-          OrderView(
-            orderId = event.metadata.aggregateId,
-            customerId = event.customerId,
-            total = event.total,
-            currency = "RUB" // значение по умолчанию для старой версии
+          OrderState(
+            orderId = e.orderId,
+            customerId = e.customerId,
+            total = e.total
           )
         )
 
-      case (_, event: OrderPlacedV2) =>
-        Some(
-          OrderView(
-            orderId = event.metadata.aggregateId,
-            customerId = event.customerId,
-            total = event.total,
-            currency = event.currency.getOrElse("RUB")
-          )
-        )
+  def replay(
+              events: Seq[EventEnvelope[? <: DomainEvent]]
+            ): Option[OrderState] =
+    events.foldLeft(Option.empty[OrderState]) {
+      case (state, envelope) =>
+        evolve(state, envelope.payload)
     }
 
+// ------------------------------------------------------------
+// 5. Demo
+// ------------------------------------------------------------
+
 @main def runEventExample(): Unit =
+
   val eventLog = new InMemoryEventLog
 
-  val correlationId = UUID.randomUUID()
+  val correlationId =
+    UUID.randomUUID()
 
-  val event1 =
-    OrderPlacedV1(
-      metadata = EventMetadata(
-        eventId = UUID.randomUUID(),
-        eventType = "OrderPlaced",
-        version = 1,
-        occurredAt = Instant.now(),
-        aggregateId = "order-123",
-        correlationId = Some(correlationId),
-        producer = "order-service"
-      ),
+  val orderPlaced =
+    OrderPlaced(
+      orderId = "order-123",
       customerId = "customer-42",
       total = BigDecimal("3250.00")
     )
 
-  val event2 =
-    OrderPlacedV2(
-      metadata = EventMetadata(
-        eventId = UUID.randomUUID(),
-        eventType = "OrderPlaced",
-        version = 2,
-        occurredAt = Instant.now(),
-        aggregateId = "order-456",
-        correlationId = Some(correlationId),
-        producer = "order-service"
-      ),
-      customerId = "customer-99",
-      total = BigDecimal("1490.00"),
-      currency = Some("RUB")
+  val envelope =
+    EventEnvelope(
+      eventId = UUID.randomUUID(),
+      aggregateId = orderPlaced.orderId,
+      eventType = "OrderPlaced",
+      version = 1,
+      occurredAt = Instant.now(),
+      correlationId = Some(correlationId),
+      causationId = None,
+      producer = "order-service",
+      payload = orderPlaced
     )
 
-  eventLog.append(event1)
-  eventLog.append(event2)
+  // событие только добавляется в log
+  eventLog.append(envelope)
 
   println("=== Event log ===")
-  eventLog.all.zipWithIndex.foreach { case (event, offset) =>
-    println(s"offset=$offset, event=$event")
+
+  eventLog.all.zipWithIndex.foreach {
+    case (event, offset) =>
+      println(
+        s"offset=$offset, " +
+          s"type=${event.eventType}, " +
+          s"aggregateId=${event.aggregateId}, " +
+          s"payload=${event.payload}"
+      )
   }
 
   println()
-  println("=== Replay order-123 ===")
+  println("=== Replay aggregate state ===")
 
-  val order123Events =
+  val orderEvents =
     eventLog.byAggregateId("order-123")
 
-  val order123 =
-    OrderProjection.replay(order123Events)
+  val state =
+    Order.replay(orderEvents)
 
-  println(order123)
+  println(state)
+
+  println()
+  println("=== Important idea ===")
+  println("Domain event = факт")
+  println("Event log = история")
+  println("Replay = восстановление aggregate state")
+  println("CQRS projection/read model появится позже")
