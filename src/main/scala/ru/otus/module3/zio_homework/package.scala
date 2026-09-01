@@ -17,19 +17,19 @@ package object zio_homework {
    * и печатать в консоль угадал или нет. Подумайте, на какие наиболее простые эффекты ее можно декомпозировать.
    */
 
-  val guessProgram: ZIO[Any, Throwable, Unit] = for {
+  val guessProgram: ZIO[Any, Throwable, Boolean] = for {
     _     <- Console.printLine("Guess between 1 and 3:")
     target <- Random.nextIntBetween(1, 4)
     input  <- Console.readLine
-    _      <- input.toIntOption match {
+    iscorrect      <- input.toIntOption match {
       case Some(guess) if guess == target =>
-        Console.printLine("You guessed!")
+        Console.printLine("You guessed!").as(true)
       case Some(_) =>
-        Console.printLine(s"Wrong! It was $target!")
+        Console.printLine(s"Wrong! It was $target!").as(false)
       case None =>
-        Console.printLine("That was not a valid number!")
+        Console.printLine("That was not a valid number!").as(false)
     }
-  } yield ()
+  } yield iscorrect
 
   /**
    * 2. реализовать функцию doWhile (общего назначения), которая будет выполнять эффект до тех пор, пока его значение в условии не даст true

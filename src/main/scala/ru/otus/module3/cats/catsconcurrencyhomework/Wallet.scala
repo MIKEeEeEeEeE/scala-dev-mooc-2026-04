@@ -2,8 +2,10 @@ package ru.otus.module3.cats.catsconcurrencyhomework
 
 
 import cats.effect.Sync
-import cats.implicits._
-import Wallet._
+import cats.implicits.*
+import Wallet.*
+
+import java.nio.file.{Files, Path, Paths}
 
 // DSL управления электронным кошельком
 trait Wallet[F[_]] {
@@ -26,9 +28,36 @@ trait Wallet[F[_]] {
 // - java.nio.file.Files.exists
 // - java.nio.file.Paths.get
 final class FileWallet[F[_]: Sync](id: WalletId) extends Wallet[F] {
-  def balance: F[BigDecimal] = ???
-  def topup(amount: BigDecimal): F[Unit] = ???
-  def withdraw(amount: BigDecimal): F[Either[WalletError, Unit]] = ???
+
+  val walletDir: Path = Paths.get("wallets")
+  val walletPath: Path = Paths.get(walletDir.toString, s"$id.txt")
+
+  val initFile: F[Unit] = Sync[F].delay {
+    if (!Files.exists(walletDir)) {
+      Files.createDirectories(walletDir)
+    }
+    if (!Files.exists(walletPath)) {
+      Files.createFile(walletPath)
+      Files.writeString(walletPath, "0")
+      print("New wallet")
+    }
+    ()
+  }
+
+  def balance: F[BigDecimal] = Sync[F].delay(Files.readString(walletPath))
+    .map(content => BigDecimal(content))
+    .adaptError { case e =>
+      new RuntimeException(s"CRITICAL WALLET ERROR: ${e.getMessage}", e)
+    }
+
+  def topup(amount: BigDecimal): F[Unit] = balance.flatMap { current =>
+    val new_balance = current + amount
+    Sync[F].delay(Files.writeString(walletPath, new_balance.toString))
+  }
+  def withdraw(amount: BigDecimal): F[Either[WalletError, Unit]] = balance.flatMap { current =>
+    if (current >= amount) topup(current - amount).as(Right(()))
+    else Sync[F].pure(Left(BalanceTooLow))
+  }
 }
 
 object Wallet {
@@ -38,7 +67,7 @@ object Wallet {
   // Здесь нужно использовать обобщенную версию уже пройденного вами метода IO.delay,
   // вызывается она так: Sync[F].delay(...)
   // Тайпкласс Sync из cats-effect описывает возможность заворачивания сайд-эффектов
-  def fileWallet[F[_]: Sync](id: WalletId): F[Wallet[F]] = ???
+  def fileWallet[F[_]: Sync](id: WalletId): F[Wallet[F]] = Sync[F].delay(new FileWallet(id))
 
   type WalletId = String
 
