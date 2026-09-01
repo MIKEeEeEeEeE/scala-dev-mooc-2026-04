@@ -5,7 +5,7 @@ import cats.effect.Sync
 import cats.implicits.*
 import Wallet.*
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path, Paths, StandardOpenOption}
 
 // DSL управления электронным кошельком
 trait Wallet[F[_]] {
@@ -44,12 +44,11 @@ final class FileWallet[F[_]: Sync](id: WalletId) extends Wallet[F] {
     ()
   }
 
-  def balance: F[BigDecimal] = Sync[F].delay(Files.readString(walletPath))
+  def balance: F[BigDecimal] = initFile *> Sync[F].delay(Files.readString(walletPath))
     .map(content => BigDecimal(content))
     .adaptError { case e =>
       new RuntimeException(s"CRITICAL WALLET ERROR: ${e.getMessage}", e)
     }
-
   def topup(amount: BigDecimal): F[Unit] = balance.flatMap { current =>
     val new_balance = current + amount
     Sync[F].delay(Files.writeString(walletPath, new_balance.toString))

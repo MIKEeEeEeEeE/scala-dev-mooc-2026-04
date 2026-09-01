@@ -22,9 +22,9 @@ object WalletFibersApp extends IOApp.Simple {
   def run: IO[Unit] =
     for {
       _ <- IO.println("Press any key to stop...")
-      wallet1 <- Wallet.fileWallet[IO]("1")
-      wallet2 <- Wallet.fileWallet[IO]("2")
-      wallet3 <- Wallet.fileWallet[IO]("3")
+      wallet1 <- Wallet.fileWallet[IO]("6")
+      wallet2 <- Wallet.fileWallet[IO]("7")
+      wallet3 <- Wallet.fileWallet[IO]("8")
       // todo: запустить все файберы и ждать ввода от пользователя чтобы завершить работу
       fiber1 <- (wallet1.topup(100) *> IO.sleep(100.millis)).foreverM.start
       fiber2 <- (wallet2.topup(100) *> IO.sleep(500.millis)).foreverM.start
