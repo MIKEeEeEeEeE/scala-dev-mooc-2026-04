@@ -1,3 +1,6 @@
+import OrderStatus.{Paid, Placed}
+import zio.*
+
 import java.time.Instant
 import java.util.UUID
 
@@ -13,8 +16,30 @@ final case class OrderPlaced(
                               total: BigDecimal
                             ) extends DomainEvent
 
+final case class OrderPaid(
+                          orderId: String,
+                          amount: BigDecimal
+                          ) extends DomainEvent
+
 // ------------------------------------------------------------
-// 2. Envelope: техническая информация вокруг доменного события
+// 2. Commands
+//
+// Команда = намерение изменить состояние системы
+// Команда может быть отклонена.
+// ------------------------------------------------------------
+
+sealed trait OrderCommand:
+  def orderId: String
+
+final case class PayOrder(
+                         orderId: String,
+                         amount: BigDecimal
+                         ) extends OrderCommand
+
+// ------------------------------------------------------------
+// 3. Event envelope
+//
+// Техническая оболочка вокруг доменного события
 // ------------------------------------------------------------
 
 final case class EventEnvelope[E <: DomainEvent](
@@ -30,36 +55,95 @@ final case class EventEnvelope[E <: DomainEvent](
                                                 )
 
 // ------------------------------------------------------------
-// 3. Event log: append-only история событий
+// 4. Event log
+//
+// В реальном приложении здесь будет repository / Event Store.
 // ------------------------------------------------------------
 
-final class InMemoryEventLog:
-  private var events: Vector[EventEnvelope[? <: DomainEvent]] =
-    Vector.empty
+trait EventLog:
 
-  def append[E <: DomainEvent](event: EventEnvelope[E]): Unit =
-    events = events :+ event
-
-  def all: Vector[EventEnvelope[? <: DomainEvent]] =
-    events
+  def append(
+            event: EventEnvelope[? <: DomainEvent]
+            ): UIO[Unit]
 
   def byAggregateId(
-                     aggregateId: String
-                   ): Vector[EventEnvelope[? <: DomainEvent]] =
-    events.filter(_.aggregateId == aggregateId)
+                   aggregateId: String
+                   ): UIO[Vector[EventEnvelope[? <: DomainEvent]]]
+
+
+final class InMemoryEventLog(
+                            ref: Ref[Vector[EventEnvelope[? <: DomainEvent]]]
+                            ) extends EventLog:
+  override def append(
+                       event: EventEnvelope[? <: DomainEvent]
+                     ): UIO[Unit] = {
+    ref.update(_ :+ event)
+  }
+
+  override def byAggregateId(
+                            aggregateId: String
+                            ): UIO[Vector[EventEnvelope[? <: DomainEvent]]] =
+    ref.get.map(
+      _.filter(_.aggregateId == aggregateId)
+    )
+
+
+object InMemoryEventLog:
+  val layer: ULayer[EventLog] =
+    ZLayer.fromZIO(
+      Ref
+        .make(Vector.empty[EventEnvelope[? <: DomainEvent]])
+        .map(new InMemoryEventLog(_))
+    )
 
 // ------------------------------------------------------------
-// 4. Aggregate state
+// 5. Aggregate state
 //
+// Это состояние write model.
 // Это НЕ CQRS read model.
-// Это состояние aggregate, которое можно восстановить из событий.
 // ------------------------------------------------------------
+
+enum OrderStatus:
+  case Placed
+  case Paid
 
 final case class OrderState(
                              orderId: String,
                              customerId: String,
-                             total: BigDecimal
+                             total: BigDecimal,
+                             status: OrderStatus
                            )
+
+// ------------------------------------------------------------
+// 6. Domain errors
+//
+// Ошибки бизнес-правил.
+// ------------------------------------------------------------
+
+sealed trait OrderError
+
+final case class OrderNotFound(
+                              orderId: String
+                              ) extends OrderError
+
+final case class OrderAlreadyPaid(
+                                 orderId: String
+                                 ) extends OrderError
+
+final case class InvalidPaymentAmount(
+                                     expected: BigDecimal,
+                                     actual: BigDecimal
+                                     ) extends OrderError
+
+// ------------------------------------------------------------
+// 7. Aggregate layer
+//
+// evolve:
+// State + Event -> New State
+//
+// decide:
+// State + Command -> Event(s)
+// ------------------------------------------------------------
 
 object Order:
 
@@ -73,7 +157,15 @@ object Order:
           OrderState(
             orderId = e.orderId,
             customerId = e.customerId,
-            total = e.total
+            total = e.total,
+            status = Placed
+          )
+        )
+
+      case _: OrderPaid =>
+        state.map(
+          _.copy(
+            status = Paid
           )
         )
 
@@ -85,66 +177,170 @@ object Order:
         evolve(state, envelope.payload)
     }
 
+  def decide(
+            state: Option[OrderState],
+            command: OrderCommand
+            ): Either[OrderError, List[DomainEvent]] =
+    command match
+      case cmd: PayOrder =>
+
+        state match {
+          case None =>
+            Left(
+              OrderNotFound(cmd.orderId)
+            )
+          case Some(order)
+            if order.status == Paid =>
+            Left(
+              OrderAlreadyPaid(order.orderId)
+            )
+          case Some(order)
+            if order.total != cmd.amount =>
+            Left(
+              InvalidPaymentAmount(
+                expected = order.total,
+                actual = cmd.amount
+              )
+            )
+          case Some(order) =>
+            Right(
+              List(
+                OrderPaid(
+                  orderId = order.orderId,
+                  amount = cmd.amount
+                )
+              )
+            )
+        }
+
 // ------------------------------------------------------------
-// 5. Demo
+// 8. Command Handler
+//
+// orchestration:
+//
+// 1. получить команду
+// 2. загрузить историю aggregate
+// 3. replay state
+// 4. вызвать domain decide
+// 5. сохранить новые события
 // ------------------------------------------------------------
 
-@main def runEventExample(): Unit =
+final class OrderCommandHandler(
+                               eventLog: EventLog
+                               ):
+  def handle(
+            command: OrderCommand,
+            correlationId: UUID
+            ): IO[OrderError, List[DomainEvent]] =
+    for {
 
-  val eventLog = new InMemoryEventLog
+      history <- eventLog.byAggregateId(command.orderId)
 
-  val correlationId =
-    UUID.randomUUID()
+      state = Order.replay(history)
 
-  val orderPlaced =
-    OrderPlaced(
-      orderId = "order-123",
-      customerId = "customer-42",
-      total = BigDecimal("3250.00")
+      newEvents <-
+        ZIO.fromEither(
+          Order.decide(
+            state, command
+          )
+        )
+
+      _ <- ZIO.foreachDiscard(newEvents) { event =>
+
+        val envelope = {
+          EventEnvelope(
+            eventId = UUID.randomUUID(),
+            aggregateId = command.orderId,
+            eventType = event.getClass.getSimpleName,
+            version = 1,
+            occurredAt = Instant.now(),
+            correlationId = Some(correlationId),
+            causationId = None,
+            producer = "order-service",
+            payload = event
+          )
+        }
+        eventLog.append(envelope)
+      }
+
+    } yield newEvents
+
+object OrderCommandHandler:
+
+  val layer: URLayer[EventLog, OrderCommandHandler] =
+    ZLayer.fromFunction(
+      new OrderCommandHandler(_)
     )
 
-  val envelope =
-    EventEnvelope(
-      eventId = UUID.randomUUID(),
-      aggregateId = orderPlaced.orderId,
-      eventType = "OrderPlaced",
-      version = 1,
-      occurredAt = Instant.now(),
-      correlationId = Some(correlationId),
-      causationId = None,
-      producer = "order-service",
-      payload = orderPlaced
-    )
+// ------------------------------------------------------------
+// 9. Demo
+//
+// Здесь мы сначала добавляем события OrderPlaced.
+// Затем отправляем команду PayOrder.
+// ------------------------------------------------------------
 
-  // событие только добавляется в log
-  eventLog.append(envelope)
+object CommandSideApp extends ZIOAppDefault:
 
-  println("=== Event log ===")
+  val program = {
+    for {
+      eventLog <- ZIO.service[EventLog]
 
-  eventLog.all.zipWithIndex.foreach {
-    case (event, offset) =>
-      println(
-        s"offset=$offset, " +
-          s"type=${event.eventType}, " +
-          s"aggregateId=${event.aggregateId}, " +
-          s"payload=${event.payload}"
+      handler <- ZIO.service[OrderCommandHandler]
+
+      correlationId = UUID.randomUUID()
+
+      initialEvent = OrderPlaced(
+        orderId = "order-123",
+        customerId = "customer-42",
+        total = BigDecimal("3250.00")
       )
+
+      initialEnvelope = {
+        EventEnvelope(
+          eventId = UUID.randomUUID(),
+          aggregateId = "order-123",
+          eventType = "OrderPlaced",
+          version = 1,
+          occurredAt = Instant.now(),
+          correlationId = Some(correlationId),
+          causationId = None,
+          producer = "order-service",
+          payload = initialEvent
+        )
+      }
+
+      _ <- eventLog.append(initialEnvelope)
+
+      command = PayOrder(
+        orderId = "order-123",
+        amount = BigDecimal("3250.00")
+      )
+
+      _ <- Console.printLine(command)
+
+      result <- handler.handle(command, correlationId).either
+
+      _ <- Console.printLine(result)
+
+      history <- eventLog.byAggregateId("order-123")
+
+      _ <- ZIO.foreachDiscard(history.zipWithIndex) { case (event, offset) =>
+        Console.printLine(
+          s"offset=$offset, " +
+            s"type=${event.eventType}, " +
+            s"payload=${event.payload}"
+        )
+      }
+
+      state = Order.replay(history)
+
+      _ <- Console.printLine(state)
+
+    } yield ()
   }
 
-  println()
-  println("=== Replay aggregate state ===")
-
-  val orderEvents =
-    eventLog.byAggregateId("order-123")
-
-  val state =
-    Order.replay(orderEvents)
-
-  println(state)
-
-  println()
-  println("=== Important idea ===")
-  println("Domain event = факт")
-  println("Event log = история")
-  println("Replay = восстановление aggregate state")
-  println("CQRS projection/read model появится позже")
+  override def run =
+    program.provide(
+      InMemoryEventLog.layer,
+      OrderCommandHandler.layer
+    )

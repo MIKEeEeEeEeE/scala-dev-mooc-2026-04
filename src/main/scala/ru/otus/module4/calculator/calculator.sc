@@ -1,6 +1,5 @@
-import cats.effect.kernel.Ref
 import java.time.Instant
-import cats.effect.{IO, Ref}
+import zio.*
 import scala.reflect.runtime.universe
 import scala.tools.reflect.ToolBox
 import scala.tools.reflect.ToolBoxError
@@ -17,7 +16,7 @@ final case class CalculatorEvent(query: String) extends DomainEvent
 // ------------------------------------------------------------
 
 final case class EventEnvelope[E <: DomainEvent](
-                                                  eventId: Long,
+                                                  eventId: Int,
                                                   version: Int,
                                                   aggregateId: Int,
                                                   occurredAt: Instant,
@@ -26,19 +25,18 @@ final case class EventEnvelope[E <: DomainEvent](
 
 
 class EventEnvelopeFactory[E <: DomainEvent](
-                                              sequenceRef: Ref[IO, Long],
+                                              sequenceRef: Ref[Int],
                                               version: Int,
                                               aggregateId: Int
                                             ) {
-  def fromPayload(payload: E): IO[EventEnvelope[E]] =
+  def fromPayload(payload: E): UIO[EventEnvelope[E]] =
     for {
       id  <- sequenceRef.updateAndGet(_ + 1)
-      now <- IO(Instant.now())
     } yield EventEnvelope(
       eventId     = id,
       version     = version,
       aggregateId = aggregateId,
-      occurredAt  = now,
+      occurredAt  = Instant.now(),
       payload     = payload
     )
 }
@@ -114,7 +112,7 @@ object Calculator {
 // ------------------------------------------------------------
 
 def prog() = for {
-  seqRef  <- Ref[IO].of(0L)
+  seqRef  <- Ref.make(0)
   calculatorId = 42
   eventLog = new InMemoryEventLog
   events = eventLog.byAggregateId(42)
@@ -128,10 +126,12 @@ def prog() = for {
   _ = exprs.foreach(eventLog.append)
 } yield Calculator.replay(exprs)
 
-import cats.effect.unsafe.implicits.global
 
-val result: CalculatorState = prog().unsafeRunSync()
-println(result)
+val state: CalculatorState = Unsafe.unsafe { implicit unsafe =>
+  Runtime.default.unsafe.run(prog()).getOrThrow()
+}
+
+println(state)
 
 
 
