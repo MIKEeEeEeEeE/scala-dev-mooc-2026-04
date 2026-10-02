@@ -209,7 +209,7 @@ val program = for {
   )
 
   _ <- ZIO.foreachDiscard(commands) { cmd =>
-    handler.handle(cmd, correlationId).ignore
+    handler.handle(cmd, correlationId)
   }
 
   history <- eventLog.byAggregateId(calculatorId)
