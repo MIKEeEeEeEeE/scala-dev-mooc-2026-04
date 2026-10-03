@@ -467,12 +467,12 @@ object BankBillingApp extends ZIOAppDefault:
 
       historyAcc1 <- eventLog.byAggregateId(BankPersistenceId(1L, "bank-account")).commit
       _ <- ZIO.foreach(historyAcc1) { envelope =>
-        Console.printLine(s"[v${envelope.versionId}] ${envelope.payload} @ ${envelope.occurredAt}")
+        Console.printLine(s"#${envelope.eventId} [v${envelope.versionId}] ${envelope.payload} @ ${envelope.occurredAt}")
       }
 
       historyAcc2 <- eventLog.byAggregateId(BankPersistenceId(2L, "bank-account")).commit
       _ <- ZIO.foreach(historyAcc2) { envelope =>
-        Console.printLine(s"[v${envelope.versionId}] ${envelope.payload} @ ${envelope.occurredAt}")
+        Console.printLine(s"#${envelope.eventId} [v${envelope.versionId}] ${envelope.payload} @ ${envelope.occurredAt}")
       }
     yield ()
 
