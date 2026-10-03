@@ -439,7 +439,7 @@ object BankBillingApp extends ZIOAppDefault:
       withdraw <- acc1Ref.ask(r => BankWithdraw(d5, r))
       _        <- Console.printLine(s"Withdraw acc1: $withdraw")
 
-      transfer1 <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d10)
+      transfer1 <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d1)
       _         <- Console.printLine(s"Transfer result 1: $transfer1")
 
       transfer2 <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d5)
@@ -448,12 +448,16 @@ object BankBillingApp extends ZIOAppDefault:
       transfer3 <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d5)
       _         <- Console.printLine(s"Transfer result 3: $transfer3")
 
-      replayed <- acc1Ref.ask(r => BankReplayAt(1L, r))
-      _        <- Console.printLine(s"Replayed at v4: $replayed")
-
       results <- ZIO.foreachPar(1 to 10) { i =>
-        acc1Ref.ask(r => BankWithdraw(d10, r))
+        acc1Ref.ask(r => BankWithdraw(d1, r))
       }
+
+      _ <- ZIO.foreach(results.zipWithIndex) { case (r, i) =>
+        Console.printLine(s"Withdraw #$i: $r")
+      }
+
+      replayed <- acc1Ref.ask(r => BankReplayAt(2L, r))
+      _        <- Console.printLine(s"Replayed at v2: $replayed")
 
       balance1 <- acc1Ref.ask(r => BankGetAccountBalance(r))
       _        <- Console.printLine(s"Balance acc1: $balance1")
