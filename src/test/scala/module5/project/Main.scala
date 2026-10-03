@@ -28,17 +28,21 @@ case object BankNegativeValue     extends BankMoneyAmountError
 case object BankCurrencyMismatch  extends BankMoneyAmountError
 
 final case class BankMoneyAmount private (currency: BankCurrency, value: BigDecimal):
+
   def +(other: BankMoneyAmount): Either[BankMoneyAmountError, BankMoneyAmount] =
     if currency != other.currency then Left(BankCurrencyMismatch)
     else BankMoneyAmount(currency, value + other.value)
+
   def -(other: BankMoneyAmount): Either[BankMoneyAmountError, BankMoneyAmount] =
     if currency != other.currency then Left(BankCurrencyMismatch)
     else BankMoneyAmount(currency, value - other.value)
 
 object BankMoneyAmount:
+
   def apply(currency: BankCurrency, value: BigDecimal): Either[BankMoneyAmountError, BankMoneyAmount] =
     if value < 0.0 then Left(BankNegativeValue)
     else Right(new BankMoneyAmount(currency, value))
+
   def zero(currency: BankCurrency): BankMoneyAmount = new BankMoneyAmount(currency, 0.0)
 
 // ------------------------------------------------------------
@@ -68,12 +72,16 @@ sealed trait ActorCommand[Response]:
 
 type BankAccountResponse = BankStatusReply[BankAccountState]
 sealed trait BankAccountCommand extends ActorCommand[BankAccountResponse]
+
 final case class BankStartAccount(currency: BankCurrency, replyTo: BankTellable[BankAccountResponse])
     extends BankAccountCommand
+
 final case class BankStopAccount(replyTo: BankTellable[BankAccountResponse])       extends BankAccountCommand
 final case class BankGetAccountBalance(replyTo: BankTellable[BankAccountResponse]) extends BankAccountCommand
+
 final case class BankDeposit(amount: BankMoneyAmount, replyTo: BankTellable[BankAccountResponse])
     extends BankAccountCommand
+
 final case class BankWithdraw(amount: BankMoneyAmount, replyTo: BankTellable[BankAccountResponse])
     extends BankAccountCommand
 
@@ -95,10 +103,13 @@ trait BankBehavior[Command]:
   def receive(command: Command): UIO[BankBehavior[Command]]
 
 object BankBehavior {
+
   def receiveMessage[Command](handler: Command => UIO[BankBehavior[Command]]): BankBehavior[Command] =
     (msg: Command) => handler(msg)
+
   def stopped[Command]: BankBehavior[Command] =
     (msg: Command) => ZIO.succeed(stopped[Command])
+
 }
 
 // ------------------------------------------------------------
@@ -141,6 +152,7 @@ final class ActorRefImpl[Protocol](mailbox: Queue[Protocol], fiber: Fiber.Runtim
 
 // ------------------------------------------------------------
 object ActorRuntime:
+
   private def readMail[Command](mailbox: Queue[Command], behaviorRef: Ref[BankBehavior[Command]]): UIO[Unit] =
     (for
       msg             <- mailbox.take
@@ -162,6 +174,7 @@ object ActorRuntime:
 sealed trait BankEffect[+Event <: ActorEvent, State <: ActorState]
 
 object BankEffect:
+
   final case class Persist[+Event <: ActorEvent, State <: ActorState](event: Event, reply: State => UIO[Unit])
       extends BankEffect[Event, State]
 
@@ -184,6 +197,7 @@ final class BankEventSourcedBehavior[
   val eventHandler: (State, Event) => State,
   val currentState: State
 ) extends BankBehavior[Command]:
+
   override def receive(command: Command): UIO[BankBehavior[Command]] =
     commandHandler(currentState, command) match {
       case BankEffect.Persist(event, reply) =>
@@ -232,6 +246,7 @@ class BankEventEnvelopeFactory[E <: ActorEvent](
   aggregateId: BankPersistenceId,
   history: BankEventLog[E]
 ) {
+
   def fromPayload(payload: E): UIO[BankEventEnvelope[E]] =
     for
       eventId   <- eventIdRef.updateAndGet(_ + 1)
@@ -243,9 +258,11 @@ class BankEventEnvelopeFactory[E <: ActorEvent](
       occurredAt = Instant.now(),
       payload = payload
     )
+
 }
 
 object BankEventEnvelopeFactory:
+
   def make[E <: ActorEvent](
     aggregateId: BankPersistenceId,
     history: BankEventLog[E],
@@ -260,6 +277,7 @@ object BankEventEnvelopeFactory:
 
 final class BankInMemoryEventLog[E <: ActorEvent](ref: TRef[Chunk[BankEventEnvelope[E]]])
     extends BankEventLog[E]:
+
   override def append(eventEnvelope: BankEventEnvelope[E]): USTM[Unit] =
     ref.update(_ :+ eventEnvelope)
 
@@ -267,6 +285,7 @@ final class BankInMemoryEventLog[E <: ActorEvent](ref: TRef[Chunk[BankEventEnvel
     ref.get.map(_.filter(_.aggregateId == aggregateId))
 
 object BankInMemoryEventLog:
+
   val layer: ULayer[BankEventLog[BankAccountEvent]] =
     ZLayer.fromZIO(
       TRef
@@ -355,6 +374,7 @@ object BankAccount:
 // TRANSFER COORDINATOR
 // ------------------------------------------------------------
 object BankTransferCoordinator:
+
   def transfer(
     fromActorRef: ActorRef[BankAccountCommand],
     toActorRef: ActorRef[BankAccountCommand],
@@ -376,6 +396,7 @@ object BankTransferCoordinator:
 // BILLING APP
 // ------------------------------------------------------------
 object BankBillingApp extends ZIOAppDefault:
+
   val program =
     for
       globalEventIdRef <- Ref.make(0L)
@@ -385,13 +406,18 @@ object BankBillingApp extends ZIOAppDefault:
       acc2             <- BankAccount(2L, eventLog, globalEventIdRef)
       acc2Ref          <- ActorRuntime.spawn(acc2)
       d10              <- ZIO.fromEither(BankMoneyAmount(BankCurrency.Dollar, 10L))
+      d5               <- ZIO.fromEither(BankMoneyAmount(BankCurrency.Dollar, 5L))
       start1           <- acc1Ref.ask(r => BankStartAccount(BankCurrency.Dollar, r))
       _                <- Console.printLine(s"Start acc1: $start1")
       start2           <- acc2Ref.ask(r => BankStartAccount(BankCurrency.Dollar, r))
       _                <- Console.printLine(s"Start acc2: $start2")
       deposit          <- acc1Ref.ask(r => BankDeposit(d10, r))
       _                <- Console.printLine(s"Deposit acc1: $deposit")
+      withdraw         <- acc1Ref.ask(r => BankWithdraw(d5, r))
+      _                <- Console.printLine(s"Deposit acc1: $withdraw")
       transfer         <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d10)
+      _                <- Console.printLine(s"Transfer result: $transfer")
+      transfer         <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d5)
       _                <- Console.printLine(s"Transfer result: $transfer")
       historyAcc1      <- eventLog.byAggregateId(BankPersistenceId(1L, "bank-account")).commit
       _ <- ZIO.foreach(historyAcc1) { envelope =>
