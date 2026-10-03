@@ -1,3 +1,5 @@
+package module5.project
+
 import zio.*
 import zio.stm.*
 import java.time.Instant
@@ -84,6 +86,8 @@ final case class BankDeposit(amount: BankMoneyAmount, replyTo: BankTellable[Bank
 
 final case class BankWithdraw(amount: BankMoneyAmount, replyTo: BankTellable[BankAccountResponse])
     extends BankAccountCommand
+
+final case class BankReplayAt(version: Long, replyTo: BankTellable[BankAccountResponse]) extends BankAccountCommand
 
 // ------------------------------------------------------------
 // RESPONSE
@@ -184,40 +188,45 @@ object BankEffect:
 // ------------------------------------------------------------
 // EVENT SOURCED BEHAVIOR
 // ------------------------------------------------------------
-final class BankEventSourcedBehavior[
-  Event <: ActorEvent,
-  State <: ActorState,
-  Command <: ActorCommand[_]
-](
+final class BankEventSourcedBehavior(
   val aggregateId: BankPersistenceId,
-  val eventLog: BankEventLog[Event],
-  val eventEnvelopeFactory: BankEventEnvelopeFactory[Event],
-  val emptyState: State,
-  val commandHandler: (State, Command) => BankEffect[Event, State],
-  val eventHandler: (State, Event) => State,
-  val currentState: State
-) extends BankBehavior[Command]:
+  val eventLog: BankEventLog[BankAccountEvent],
+  val eventEnvelopeFactory: BankEventEnvelopeFactory[BankAccountEvent],
+  val emptyState: BankAccountState,
+  val commandHandler: (BankAccountState, BankAccountCommand) => BankEffect[BankAccountEvent, BankAccountState],
+  val eventHandler: (BankAccountState, BankAccountEvent) => BankAccountState,
+  val currentState: BankAccountState
+) extends BankBehavior[BankAccountCommand]:
 
-  override def receive(command: Command): UIO[BankBehavior[Command]] =
-    commandHandler(currentState, command) match {
-      case BankEffect.Persist(event, reply) =>
+  override def receive(command: BankAccountCommand): UIO[BankBehavior[BankAccountCommand]] = {
+    command match
+      case BankReplayAt(pred, replyTo) =>
         for
-          envelope <- eventEnvelopeFactory.fromPayload(event)
-          _        <- eventLog.append(envelope).commit
-          state = eventHandler(currentState, event)
-          _ <- reply(state)
-        yield new BankEventSourcedBehavior(
-          aggregateId,
-          eventLog,
-          eventEnvelopeFactory,
-          emptyState,
-          commandHandler,
-          eventHandler,
-          state
-        )
+          history <- eventLog.byAggregateId(aggregateId).commit
+          checkpoint = BankAccount.replayAt(history, pred)
+          _ <- replyTo.tell(BankStatusReply.success(checkpoint))
+        yield this
 
-      case BankEffect.Reply(action) => action.as(this)
-    }
+      case _ =>
+        commandHandler(currentState, command) match {
+          case BankEffect.Persist(event, reply) =>
+            for
+              envelope <- eventEnvelopeFactory.fromPayload(event)
+              _        <- eventLog.append(envelope).commit
+              state = eventHandler(currentState, event)
+              _ <- reply(state)
+            yield new BankEventSourcedBehavior(
+              aggregateId,
+              eventLog,
+              eventEnvelopeFactory,
+              emptyState,
+              commandHandler,
+              eventHandler,
+              state
+            )
+          case BankEffect.Reply(action) => action.as(this)
+        }
+  }
 
 // ------------------------------------------------------------
 // EVENT LOG
@@ -331,13 +340,20 @@ object BankAccount:
         balance - amount match
           case Right(newBalance) => BankActive(newBalance)
           case Left(_)           => state
-      case (BankActive(balance), BankAccountFrozen) => BankFrozen(balance)
+      case (BankActive(balance), BankAccountOpened(_)) => BankActive(balance)
+      case (BankActive(balance), BankAccountFrozen)    => BankFrozen(balance)
+      case (BankUninitialized, BankFundsWithdrawn(_))  => BankUninitialized
+      case (BankUninitialized, BankAccountFrozen)      => BankUninitialized
+      case (BankUninitialized, BankFundsDeposited(_))  => BankUninitialized
 
   def replay(events: Chunk[BankEventEnvelope[BankAccountEvent]]): BankAccountState =
     events.foldLeft[BankAccountState](BankUninitialized) {
       (state, envelope) =>
         evolve(state, envelope.payload)
     }
+
+  def replayAt(events: Chunk[BankEventEnvelope[BankAccountEvent]], version: Long): BankAccountState =
+    replay(events.takeWhile(_.versionId <= version))
 
   def decide(
     state: BankAccountState,
@@ -397,36 +413,58 @@ object BankTransferCoordinator:
 // ------------------------------------------------------------
 object BankBillingApp extends ZIOAppDefault:
 
-  val program =
+  val program: ZIO[BankEventLog[BankAccountEvent], Object, Unit] =
     for
       globalEventIdRef <- Ref.make(0L)
       eventLog         <- ZIO.service[BankEventLog[BankAccountEvent]]
-      acc1             <- BankAccount(1L, eventLog, globalEventIdRef)
-      acc1Ref          <- ActorRuntime.spawn(acc1)
-      acc2             <- BankAccount(2L, eventLog, globalEventIdRef)
-      acc2Ref          <- ActorRuntime.spawn(acc2)
-      d10              <- ZIO.fromEither(BankMoneyAmount(BankCurrency.Dollar, 10L))
-      d5               <- ZIO.fromEither(BankMoneyAmount(BankCurrency.Dollar, 5L))
-      start1           <- acc1Ref.ask(r => BankStartAccount(BankCurrency.Dollar, r))
-      _                <- Console.printLine(s"Start acc1: $start1")
-      start2           <- acc2Ref.ask(r => BankStartAccount(BankCurrency.Dollar, r))
-      _                <- Console.printLine(s"Start acc2: $start2")
-      deposit          <- acc1Ref.ask(r => BankDeposit(d10, r))
-      _                <- Console.printLine(s"Deposit acc1: $deposit")
-      withdraw         <- acc1Ref.ask(r => BankWithdraw(d5, r))
-      _                <- Console.printLine(s"Deposit acc1: $withdraw")
-      transfer         <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d10)
-      _                <- Console.printLine(s"Transfer result: $transfer")
-      transfer         <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d5)
-      _                <- Console.printLine(s"Transfer result: $transfer")
-      historyAcc1      <- eventLog.byAggregateId(BankPersistenceId(1L, "bank-account")).commit
+
+      acc1    <- BankAccount(1L, eventLog, globalEventIdRef)
+      acc1Ref <- ActorRuntime.spawn(acc1)
+      acc2    <- BankAccount(2L, eventLog, globalEventIdRef)
+      acc2Ref <- ActorRuntime.spawn(acc2)
+
+      d10 <- ZIO.fromEither(BankMoneyAmount(BankCurrency.Dollar, 10L))
+      d5  <- ZIO.fromEither(BankMoneyAmount(BankCurrency.Dollar, 5L))
+
+      start1 <- acc1Ref.ask(r => BankStartAccount(BankCurrency.Dollar, r))
+      _      <- Console.printLine(s"Start acc1: $start1")
+
+      start2 <- acc2Ref.ask(r => BankStartAccount(BankCurrency.Dollar, r))
+      _      <- Console.printLine(s"Start acc2: $start2")
+
+      deposit <- acc1Ref.ask(r => BankDeposit(d10, r))
+      _       <- Console.printLine(s"Deposit acc1: $deposit")
+
+      withdraw <- acc1Ref.ask(r => BankWithdraw(d5, r))
+      _        <- Console.printLine(s"Withdraw acc1: $withdraw")
+
+      transfer1 <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d10)
+      _         <- Console.printLine(s"Transfer result 1: $transfer1")
+
+      transfer2 <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d5)
+      _         <- Console.printLine(s"Transfer result 2: $transfer2")
+
+      replayed <- acc1Ref.ask(r => BankReplayAt(2L, r))
+      _        <- Console.printLine(s"Replayed at v4: $replayed")
+
+      transfer3 <- BankTransferCoordinator.transfer(acc1Ref, acc2Ref, d5)
+      _         <- Console.printLine(s"Transfer result 3: $transfer3")
+
+      balance1 <- acc1Ref.ask(r => BankGetAccountBalance(r))
+      _        <- Console.printLine(s"Balance acc1: $balance1")
+
+      balance2 <- acc2Ref.ask(r => BankGetAccountBalance(r))
+      _        <- Console.printLine(s"Balance acc2: $balance2")
+
+      historyAcc1 <- eventLog.byAggregateId(BankPersistenceId(1L, "bank-account")).commit
       _ <- ZIO.foreach(historyAcc1) { envelope =>
         Console.printLine(s"[v${envelope.versionId}] ${envelope.payload} @ ${envelope.occurredAt}")
       }
+
       historyAcc2 <- eventLog.byAggregateId(BankPersistenceId(2L, "bank-account")).commit
       _ <- ZIO.foreach(historyAcc2) { envelope =>
         Console.printLine(s"[v${envelope.versionId}] ${envelope.payload} @ ${envelope.occurredAt}")
       }
     yield ()
 
-  def run = program.provide(BankInMemoryEventLog.layer)
+  def run: ZIO[ZIOAppArgs & Scope, Any, Any] = program.provide(BankInMemoryEventLog.layer)
